@@ -8,7 +8,7 @@ Two self-contained HTML files: a research-backed **psychometric test battery** t
 
 ## The hypothesis
 
-> We do not need to build a complex AI tutoring system — RAG pipelines, prompt scaffolding, orchestration and all the gimmicks. Instead: **understand the student once, model them into research-backed parameters, and default commercial models will automatically adapt how they teach** — in the best way available to that model — from the parameters alone. The result is a simple, easy-to-maintain system, and **even small models (e.g. Claude Haiku) perform well** with this setup.
+> We do not need to build a complex AI tutoring system — RAG pipelines, prompt scaffolding, orchestration and lengthy guardrails to provide customized learning experience. Instead: **understand the student once, model them into research-backed parameters, and default commercial models will automatically adapt how they teach** — in the best way available to that model — from the parameters alone. The result is a simple, easy-to-maintain system, and **even small models (e.g. Claude Haiku) perform well** with this setup.
 
 **This experiment was built to test that hypothesis — and in our runs, it held.** With nothing but the parameter block below in the system prompt, off-the-shelf models chunk explanations for a low working-memory profile, drop time pressure and soften framing for a high-anxiety profile, lean on diagrams for high-spatial students, insert confidence checks for overconfident ones, and change pacing for slow processing speed — without ever being told *how* to do any of that per-topic. The adaptation knowledge already lives inside the model; the parameters just aim it.
 
