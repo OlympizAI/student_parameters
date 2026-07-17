@@ -188,11 +188,26 @@ input[type=range]{width:100%;accent-color:var(--accent);cursor:pointer}
 .chat-input-wrap{padding:0 24px 22px;background:var(--bg)}
 .chat-input{max-width:780px;margin:0 auto;display:flex;gap:10px;align-items:flex-end;background:var(--card);border:1px solid var(--border2);border-radius:16px;padding:10px 12px;box-shadow:var(--shadow)}
 .chat-input:focus-within{border-color:var(--accent)}
+.chat-input.dragover{border-color:var(--accent);background:var(--accent-lt)}
 #chatText{flex:1;background:transparent;border:none;color:var(--text);padding:6px 6px;font-size:14.5px;font-family:inherit;resize:none;max-height:170px;line-height:1.5}
 #chatText:focus{outline:none}
 .sendbtn{background:var(--accent);color:#fff;border:none;border-radius:11px;width:38px;height:38px;font-size:16px;cursor:pointer;flex-shrink:0}
 .sendbtn:hover{background:var(--accent-dk)}
 .sendbtn:disabled{opacity:.35;cursor:default}
+.attach-btn{background:var(--card);color:var(--muted);border:1px solid var(--border2);border-radius:11px;width:38px;height:38px;font-size:15px;cursor:pointer;flex-shrink:0}
+.attach-btn:hover{background:var(--hover);color:var(--text)}
+.attstrip{max-width:780px;margin:0 auto 8px;display:flex;gap:8px;flex-wrap:wrap}
+.attchip{position:relative;display:flex;align-items:center;gap:7px;background:var(--card);border:1px solid var(--border2);border-radius:10px;padding:5px 9px 5px 5px;font-size:12px;color:var(--muted);box-shadow:var(--shadow);max-width:200px}
+.attchip img{width:30px;height:30px;object-fit:cover;border-radius:6px;flex-shrink:0}
+.attchip .ic{width:30px;height:30px;border-radius:6px;background:var(--accent-lt);color:var(--accent-dk);display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0}
+.attchip .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
+.attchip .rm{cursor:pointer;color:var(--muted);font-weight:700;margin-left:2px;flex-shrink:0;padding:0 2px}
+.attchip .rm:hover{color:var(--red)}
+.atterr{max-width:780px;margin:0 auto 8px;font-size:12px;color:var(--red)}
+.msg-atts{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;justify-content:flex-end}
+.msg-att{display:flex;align-items:center;gap:6px;background:var(--card2);border:1px solid var(--border);border-radius:9px;padding:4px 9px;font-size:11.5px;color:var(--muted)}
+.msg-att img{width:26px;height:26px;object-fit:cover;border-radius:5px;cursor:pointer}
+.msg-att .ic{width:16px;text-align:center}
 /* modal */
 .modal-bg{position:fixed;inset:0;background:rgba(50,45,25,.35);display:none;align-items:center;justify-content:center;z-index:50}
 .modal-bg.show{display:flex}
@@ -244,9 +259,13 @@ input[type=range]{width:100%;accent-color:var(--accent);cursor:pointer}
     <div class="chat-scroll" id="chatScroll">
       <div class="chat-inner" id="chatInner"></div>
     </div>
-    <div class="chat-input-wrap">
-      <div class="chat-input">
-        <textarea id="chatText" rows="1" placeholder="Ask the tutor to teach you a topic…"></textarea>
+    <div class="chat-input-wrap" id="chatInputWrap">
+      <div class="attstrip" id="attStrip"></div>
+      <div class="atterr" id="attErr" style="display:none"></div>
+      <div class="chat-input" id="chatInputBox">
+        <input type="file" id="fileInput" multiple accept="image/*,application/pdf,.txt,.md,.csv,.json,.log" style="display:none">
+        <button class="attach-btn" id="attachBtn" type="button" title="Attach a photo, PDF, or text file">📎</button>
+        <textarea id="chatText" rows="1" placeholder="Ask the tutor to teach you a topic, or attach a photo/PDF of your doubt…"></textarea>
         <button class="sendbtn" id="sendBtn" title="Send">↑</button>
       </div>
     </div>
@@ -405,6 +424,20 @@ const TOOLS = [{
     prompt: { type:"string", description:"Detailed description of the diagram to draw: exact elements, geometry, labels/annotations, axes, arrows. Style will be a clean whiteboard-style educational diagram on white background." }
   }, required:["prompt"] }
 }];
+
+/* ---- chat attachments (photos / PDFs / text files) ----
+   Limits follow Claude's documented request caps: images resized to <=1568px
+   longest edge (Anthropic's own time-to-first-token guidance) and capped at
+   8MB post-resize; PDFs capped at 25MB to leave headroom under the 32MB/100-page
+   whole-request limit; plain-text files capped at 50k chars (truncated, not rejected). */
+const ATT_MAX_COUNT = 6;
+const ATT_IMAGE_MAX_LONG_EDGE = 1568;
+const ATT_IMAGE_MAX_BYTES = 8*1024*1024;
+const ATT_PDF_MAX_BYTES = 25*1024*1024;
+const ATT_TEXT_MAX_CHARS = 50000;
+const ATT_IMAGE_TYPES = ["image/jpeg","image/png","image/gif","image/webp"];
+const ATT_TEXT_EXT = /\.(txt|md|markdown|csv|json|log)$/i;
+let pendingAtts = [];   // in-memory only — never persisted; cleared on send/chat-switch
 const defaultState = () => ({
   profile: {name:"",
     params: Object.fromEntries(PARAMS.map(p => [p.code,
@@ -442,12 +475,24 @@ if (!S.apiKey) S.apiKey = DEFAULT_KEY;
 if (!MODELS.includes(S.model)) S.model = "claude-sonnet-5";
 MODELS.forEach(m => S.hyper[m] = Object.assign({}, HYPER_DEFAULTS[m], (S.hyper||{})[m]||{}));
 if (S.activeChat && !S.chats.find(c=>c.id===S.activeChat)) S.activeChat = null;
+function stripAttachmentBlocks(msgs){
+  // replace uploaded image/document blocks with a text placeholder — never leave
+  // an image/document block with emptied data, since that would still be sent
+  // to the API on the next turn and rejected.
+  (msgs||[]).forEach(m => {
+    if (m.role==="user" && Array.isArray(m.content)){
+      m.content = m.content.map(b => (b.type==="image"||b.type==="document")
+        ? {type:"text", text:"[Attached file removed from local history to save space]", _stripped:true}
+        : b);
+    }
+  });
+}
 function save(){
   try { localStorage.setItem(LS_KEY, JSON.stringify(S)); }
-  catch(e){ // quota: drop stored diagram images from inactive chats, then all
-    S.chats.forEach(c => { if (c.id!==S.activeChat) c.messages.forEach(m => { delete m.imgs; }); });
+  catch(e){ // quota: drop stored diagram images + old attachment blobs from inactive chats first, then all
+    S.chats.forEach(c => { if (c.id!==S.activeChat){ c.messages.forEach(m => { delete m.imgs; }); stripAttachmentBlocks(c.messages); } });
     try { localStorage.setItem(LS_KEY, JSON.stringify(S)); }
-    catch(e2){ S.chats.forEach(c => c.messages.forEach(m => { delete m.imgs; }));
+    catch(e2){ S.chats.forEach(c => { c.messages.forEach(m => { delete m.imgs; }); stripAttachmentBlocks(c.messages); });
       try { localStorage.setItem(LS_KEY, JSON.stringify(S)); } catch(e3){} }
   }
 }
@@ -455,7 +500,13 @@ const coveredSet = subj => new Set(S.covered[subj]);
 function chatTitleFrom(msgs){
   const m = (msgs||[]).find(x=>x.role==="user");
   if (!m) return "New chat";
-  return m.content.split("\n")[0].replace(/^SYLLABUS.*/s,"").slice(0,48) || "New chat";
+  if (typeof m.content === "string")
+    return m.content.split("\n")[0].replace(/^SYLLABUS.*/s,"").slice(0,48) || "New chat";
+  const last = Array.isArray(m.content) ? m.content[m.content.length-1] : null;
+  const txt = (last && last.text) ? last.text.split("\n")[0].replace(/^SYLLABUS.*/s,"") : "";
+  if (txt) return txt.slice(0,48);
+  const firstAtt = m.atts && m.atts[0] && m.atts[0].name;
+  return ("📎 " + (firstAtt || "attachment")).slice(0,48);
 }
 const activeChat = () => S.chats.find(c=>c.id===S.activeChat) || null;
 
@@ -762,7 +813,8 @@ TEACHING PROTOCOL:
 4. Use LaTeX for all mathematics ($inline$ and $$display$$).
 5. DIAGRAMS: you have a generate_diagram tool that renders an image inline in the chat. Use it whenever a picture genuinely helps — physics setups, geometry, graphs, vectors, structures, ray diagrams. If the student's Spatial Ability is low, use diagrams MORE (offload their visualisation); if high, diagrams plus geometric arguments play to their strength. One well-labelled diagram per concept; give the tool a precise, fully-specified description.
 6. End substantial teaching turns with: what was covered, what's next, and remind the student to tick newly-mastered topics in the Syllabus tab.
-7. Keep the tone matched to the profile above. Default: warm, precise, exam-focused.`;
+7. Keep the tone matched to the profile above. Default: warm, precise, exam-focused.
+8. ATTACHMENTS: the student can attach photos (e.g. a handwritten problem or a textbook page) and PDFs directly in chat. When a message includes one, read it carefully first — transcribe the key parts of the problem back to the student so they know you read it correctly, then either solve it step-by-step or diagnose exactly where their working goes wrong, matching the teaching protocol above (short sections, one check-question at a time, adapt to the profile).`;
 }
 
 /* ============================================================
@@ -823,10 +875,12 @@ function renderChatList(){
 }
 function switchChat(id){
   S.activeChat = id; save();
+  pendingAtts = []; renderAttStrip();
   setView("chat"); renderChatList(); renderMessages(); refreshChips();
 }
 function newChat(){
   S.activeChat = null; save();
+  pendingAtts = []; renderAttStrip();
   setView("chat"); renderChatList(); renderMessages(); refreshChips();
   document.getElementById("chatText").focus();
 }
@@ -842,10 +896,37 @@ function mdRender(el, text){
       throwOnError:false});
   } catch(e){ el.textContent = text; }
 }
-function addUserMsg(text){
+const isToolResultMsg = content => Array.isArray(content) && content.some(b=>b.type==="tool_result");
+function renderUserBubble(content, atts){
+  const text = typeof content === "string" ? content : ((content[content.length-1]||{}).text || "");
   const m = document.createElement("div"); m.className="msg-user";
-  const b = document.createElement("div"); b.className="bubble"; b.textContent = stripCtx(text);
-  m.appendChild(b); chatInner.appendChild(m);
+  const b = document.createElement("div"); b.className="bubble";
+  if (text) b.textContent = stripCtx(text);
+  m.appendChild(b);
+  if (atts && atts.length){
+    const wrap = document.createElement("div"); wrap.className="msg-atts";
+    atts.forEach((a,i) => {
+      const chip = document.createElement("div"); chip.className="msg-att";
+      const blk = Array.isArray(content) ? content[i] : null;
+      const src = blk && blk.source && blk.source.data;
+      if (a.kind==="image" && src){
+        const img = document.createElement("img");
+        img.src = `data:${blk.source.media_type};base64,${src}`;
+        img.title = a.name;
+        img.onclick = () => window.open(img.src, "_blank");
+        chip.appendChild(img);
+      } else {
+        const ic = document.createElement("span"); ic.className="ic";
+        ic.textContent = !src ? "🗑" : (a.kind==="pdf" ? "📄" : "📝");
+        const nm = document.createElement("span");
+        nm.textContent = !src ? (a.name+" — removed to save space") : a.name;
+        chip.appendChild(ic); chip.appendChild(nm);
+      }
+      wrap.appendChild(chip);
+    });
+    m.appendChild(wrap);
+  }
+  chatInner.appendChild(m);
 }
 function addAiMsg(text){
   const m = document.createElement("div"); m.className="msg-ai";
@@ -908,7 +989,9 @@ function renderMessages(){
   }
   c.messages.forEach(m => {
     if (m.role==="user"){
-      if (typeof m.content === "string") addUserMsg(m.content);           // tool_result arrays are not displayed
+      if (typeof m.content === "string") renderUserBubble(m.content);
+      else if (!isToolResultMsg(m.content)) renderUserBubble(m.content, m.atts);  // attachment turn
+      // else: tool_result continuation — not displayed
     } else renderAssistant(m);
   });
   chatScroll.scrollTop = chatScroll.scrollHeight;
@@ -921,6 +1004,82 @@ document.getElementById("sendBtn").onclick = sendMsg;
 document.addEventListener("click", e => {
   if (e.target.classList.contains("sugg")) { ta.value = e.target.textContent; sendMsg(); }
 });
+
+/* ---- attachment staging (photos / PDFs / text files) ---- */
+function attErr(msg){
+  const e = document.getElementById("attErr");
+  e.textContent = msg; e.style.display = "block";
+  clearTimeout(attErr._t); attErr._t = setTimeout(()=>{ e.style.display="none"; }, 5000);
+}
+function fileToDataURL(file){ return new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.onerror=()=>rej(new Error("read failed")); r.readAsDataURL(file); }); }
+function fileToText(file){ return new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.onerror=()=>rej(new Error("read failed")); r.readAsText(file); }); }
+function downscaleImage(dataUrl){
+  return new Promise(res => {
+    const img = new Image();
+    img.onload = () => {
+      const longEdge = Math.max(img.width, img.height);
+      if (longEdge <= ATT_IMAGE_MAX_LONG_EDGE){ res({dataUrl}); return; }
+      const scale = ATT_IMAGE_MAX_LONG_EDGE/longEdge;
+      const cv = document.createElement("canvas");
+      cv.width = Math.max(1,Math.round(img.width*scale)); cv.height = Math.max(1,Math.round(img.height*scale));
+      cv.getContext("2d").drawImage(img,0,0,cv.width,cv.height);
+      res({dataUrl: cv.toDataURL("image/jpeg",0.85), mediaType:"image/jpeg"});
+    };
+    img.onerror = () => res({dataUrl});   // fall back to the original if decoding fails
+    img.src = dataUrl;
+  });
+}
+async function handleFiles(fileList){
+  const files = Array.from(fileList||[]);
+  for (const file of files){
+    if (pendingAtts.length >= ATT_MAX_COUNT){ attErr(`Max ${ATT_MAX_COUNT} attachments per message.`); break; }
+    try {
+      if (ATT_IMAGE_TYPES.includes(file.type)){
+        if (file.size > ATT_IMAGE_MAX_BYTES*2){ attErr(`"${file.name}" is too large (try a smaller photo).`); continue; }
+        let dataUrl = await fileToDataURL(file);
+        let mediaType = file.type;
+        const scaled = await downscaleImage(dataUrl);
+        dataUrl = scaled.dataUrl; if (scaled.mediaType) mediaType = scaled.mediaType;
+        const base64 = dataUrl.split(",")[1] || "";
+        if (Math.ceil(base64.length*0.75) > ATT_IMAGE_MAX_BYTES){ attErr(`"${file.name}" is still too large after resizing.`); continue; }
+        pendingAtts.push({name:file.name, kind:"image", mediaType, base64, dataUrl, size:file.size});
+      } else if (file.type === "application/pdf" || /\.pdf$/i.test(file.name)){
+        if (file.size > ATT_PDF_MAX_BYTES){ attErr(`"${file.name}" is too large (max 25MB).`); continue; }
+        const dataUrl = await fileToDataURL(file);
+        const base64 = dataUrl.split(",")[1] || "";
+        pendingAtts.push({name:file.name, kind:"pdf", mediaType:"application/pdf", base64, size:file.size});
+      } else if (ATT_TEXT_EXT.test(file.name) || /^text\//.test(file.type)){
+        let text = await fileToText(file);
+        let truncated = false;
+        if (text.length > ATT_TEXT_MAX_CHARS){ text = text.slice(0, ATT_TEXT_MAX_CHARS); truncated = true; }
+        pendingAtts.push({name:file.name, kind:"text", text, truncated, size:file.size});
+      } else {
+        attErr(`"${file.name}" isn't supported yet — try a photo, a PDF, or a plain-text/.csv export.`);
+      }
+    } catch(e){ attErr(`Couldn't read "${file.name}": ${e.message}`); }
+  }
+  renderAttStrip();
+}
+function renderAttStrip(){
+  const strip = document.getElementById("attStrip");
+  strip.innerHTML = "";
+  pendingAtts.forEach((a,i) => {
+    const chip = document.createElement("div"); chip.className="attchip";
+    if (a.kind==="image"){ const img=document.createElement("img"); img.src=a.dataUrl; chip.appendChild(img); }
+    else { const ic=document.createElement("div"); ic.className="ic"; ic.textContent = a.kind==="pdf" ? "📄" : "📝"; chip.appendChild(ic); }
+    const nm = document.createElement("span"); nm.className="nm"; nm.title=a.name; nm.textContent=a.name;
+    const rm = document.createElement("span"); rm.className="rm"; rm.textContent="✕"; rm.title="Remove";
+    rm.onclick = () => { pendingAtts.splice(i,1); renderAttStrip(); };
+    chip.appendChild(nm); chip.appendChild(rm);
+    strip.appendChild(chip);
+  });
+}
+document.getElementById("attachBtn").onclick = () => document.getElementById("fileInput").click();
+document.getElementById("fileInput").onchange = e => { handleFiles(e.target.files); e.target.value = ""; };
+const chatInputBox = document.getElementById("chatInputBox");
+["dragover","dragenter"].forEach(ev => chatInputBox.addEventListener(ev, e => { e.preventDefault(); chatInputBox.classList.add("dragover"); }));
+["dragleave","drop"].forEach(ev => chatInputBox.addEventListener(ev, e => { e.preventDefault(); chatInputBox.classList.remove("dragover"); }));
+chatInputBox.addEventListener("drop", e => { if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files); });
 
 /* ---- OpenAI image generation (GPT Image 2 — fastest OpenAI image model) ----
    Defaults locked to the house style: 16:9 landscape, black-and-white line
@@ -951,7 +1110,9 @@ async function openaiImage(prompt, size){
    never split a tool_use / tool_result pair */
 function apiHistory(c){
   let msgs = c.messages.slice(-30);
-  while (msgs.length && !(msgs[0].role==="user" && typeof msgs[0].content==="string")) msgs.shift();
+  // a valid starting turn is any real user message (plain text OR an attachment
+  // turn) — only a tool_result continuation (mid-sequence) must never lead
+  while (msgs.length && (msgs[0].role!=="user" || isToolResultMsg(msgs[0].content))) msgs.shift();
   return msgs.map(m=>({role:m.role, content:m.content}));
 }
 
@@ -1027,23 +1188,40 @@ async function streamOnce(c, holder){
 let busy = false;
 async function sendMsg(){
   const text = ta.value.trim();
-  if (!text || busy) return;
+  if ((!text && !pendingAtts.length) || busy) return;
   if (!S.apiKey){ openKeyModal(); return; }
   ta.value=""; ta.style.height="auto";
   busy = true; document.getElementById("sendBtn").disabled = true;
 
+  const atts = pendingAtts; pendingAtts = []; renderAttStrip();
+
   let c = activeChat();
   if (!c){
-    c = {id: Date.now(), title: text.slice(0,48), ts: Date.now(), messages: []};
+    const titleSeed = text || (atts[0] && ("📎 "+atts[0].name)) || "New chat";
+    c = {id: Date.now(), title: titleSeed.slice(0,48), ts: Date.now(), messages: []};
     S.chats.push(c); S.activeChat = c.id;
     renderChatList();
   }
   c.ts = Date.now();
 
   const ctx = topicContext(text);
+  let content, attsMeta;
+  if (atts.length){
+    content = atts.map(a => {
+      if (a.kind==="image") return {type:"image", source:{type:"base64", media_type:a.mediaType, data:a.base64}};
+      if (a.kind==="pdf")   return {type:"document", source:{type:"base64", media_type:"application/pdf", data:a.base64}};
+      return {type:"text", text:`Attached file "${a.name}"${a.truncated?" (truncated — showing the first "+ATT_TEXT_MAX_CHARS+" characters)":""}:\n\n${a.text}`};
+    });
+    content.push({type:"text", text: (text || "Please look at what I've attached and help me understand or solve it.") + ctx});
+    attsMeta = atts.map(a => ({name:a.name, kind:a.kind, size:a.size}));
+  } else {
+    content = text + ctx;
+    attsMeta = undefined;
+  }
+
   if (!c.messages.length) chatInner.innerHTML = "";
-  addUserMsg(text);
-  c.messages.push({role:"user", content: text + ctx});
+  renderUserBubble(content, attsMeta);
+  c.messages.push({role:"user", content, atts: attsMeta});
   save(); renderChatList(); refreshChips();
   chatScroll.scrollTop = chatScroll.scrollHeight;
 

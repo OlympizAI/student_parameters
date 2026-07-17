@@ -33,7 +33,7 @@ Two self-contained HTML files: a research-backed **psychometric test battery** t
 ```
 
 1. **`app/battery.html`** — a student sits one ~32-minute session (11 stages: reasoning, memory span, symbol sprint, paired-associate learning, spatial, number sense, sustained attention, reflection traps, delayed recall, self-report — plus a passive telemetry layer). Every scored answer carries a confidence tag, which yields calibration (D3) for free. It scores everything client-side against literature-derived anchor tables and exports `mirror_profile.json`.
-2. **`app/tutor.html`** — a chat tutor whose entire "intelligence" about the student is the parameter block rendered into the system prompt (template below). Sliders can also be set by hand — the battery just replaces guesswork with measurement.
+2. **`app/tutor.html`** — a chat tutor whose entire "intelligence" about the student is the parameter block rendered into the system prompt (template below). Sliders can also be set by hand — the battery just replaces guesswork with measurement. The student can also attach a photo of a handwritten problem, a textbook page, or a PDF directly in the chat — the tutor reads it and starts teaching or debugging from there.
 3. The model does the rest.
 
 ## Quick start
@@ -101,6 +101,7 @@ TEACHING PROTOCOL:
 5. DIAGRAMS: you have a generate_diagram tool that renders an image inline in the chat. Use it whenever a picture genuinely helps — physics setups, geometry, graphs, vectors, structures, ray diagrams. If the student's Spatial Ability is low, use diagrams MORE (offload their visualisation); if high, diagrams plus geometric arguments play to their strength. One well-labelled diagram per concept; give the tool a precise, fully-specified description.
 6. End substantial teaching turns with: what was covered, what's next, and remind the student to tick newly-mastered topics in the Syllabus tab.
 7. Keep the tone matched to the profile above. Default: warm, precise, exam-focused.
+8. ATTACHMENTS: the student can attach photos (e.g. a handwritten problem or a textbook page) and PDFs directly in chat. When a message includes one, read it carefully first — transcribe the key parts of the problem back to the student so they know you read it correctly, then either solve it step-by-step or diagnose exactly where their working goes wrong, matching the teaching protocol above (short sections, one check-question at a time, adapt to the profile).
 ````
 
 ### How `{{PARAMETER_LINES}}` is rendered
