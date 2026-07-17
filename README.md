@@ -39,7 +39,7 @@ Two self-contained HTML files: a research-backed **psychometric test battery** t
 ## Quick start
 
 ```
-git clone https://github.com/DreamBookStudio/student_parameters.git
+git clone https://github.com/OlympizAI/student_parameters.git
 cd student_parameters
 open app/battery.html    # take the test → download mirror_profile.json
 open app/tutor.html      # set your API key (below), set params to the measured bands, chat
